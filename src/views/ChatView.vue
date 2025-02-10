@@ -62,6 +62,7 @@ onUpdated(() => {
 })
 
 async function get_messages() {
+  data.value = []
   const username_from = username.value.trim()
   const username_to = chat_name.value.trim()
   if (!username_from || !username_to) return
