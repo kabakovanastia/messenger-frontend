@@ -45,19 +45,67 @@ const fr_span = useTemplateRef('friend_span')
 const msg_inp = useTemplateRef('message_inp')
 const msgs = useTemplateRef('messages')
 
+const DB_VERSION = 4
+
 let web_sock
+const openRequest = indexedDB.open('messages', DB_VERSION)
+openRequest.onupgradeneeded = function (event) {
+  const db = event.target.result
+  console.log(db.objectStoreNames)
+  if (!db.objectStoreNames.contains('msgs')) {
+    db.createObjectStore('msgs', { keyPath: 'id' })
+  }
+}
 
 onUpdated(() => {
   msgs.value.scrollTop = msgs.value.scrollHeight
 })
 
 async function get_messages() {
-  const username_from = username.value
-  const username_to = chat_name.value
-  if (!username_from.trim() || !username_to.trim()) return
-  data.value = (
-    await axios.get(`http://127.0.0.1:8000/api/all/?p1=${username_from}&p2=${username_to}`)
-  ).data
+  const username_from = username.value.trim()
+  const username_to = chat_name.value.trim()
+  if (!username_from || !username_to) return
+
+  const openRequest = indexedDB.open('messages', DB_VERSION)
+  openRequest.onsuccess = function () {
+    const db = openRequest.result
+
+    const temp_data = []
+    const msgs_trans = db.transaction('msgs', 'readonly').objectStore('msgs')
+    const cursorRequest = msgs_trans.openCursor()
+    cursorRequest.onsuccess = async function () {
+      const cursor = cursorRequest.result
+      if (cursor) {
+        const cur_msg = cursor.value
+        if (
+          (cur_msg['msg_from'] == username_from && cur_msg['msg_to'] == username_to) ||
+          (cur_msg['msg_from'] == username_to && cur_msg['msg_to'] == username_from)
+        ) {
+          temp_data.push(cur_msg)
+        }
+        cursor.continue()
+      } else {
+        if (temp_data.length == 0) {
+          axios
+            .get(`http://127.0.0.1:8000/api/all/?p1=${username_from}&p2=${username_to}`)
+            .then((response) => {
+              const messages = response.data
+              data.value = messages
+              const msgs_trans = db.transaction('msgs', 'readwrite').objectStore('msgs')
+              for (const item of messages) {
+                msgs_trans.add(item)
+              }
+            })
+            .catch(function (error) {
+              // console.log(error)
+            })
+        } else {
+          data.value = temp_data
+          get_messages_since()
+        }
+      }
+    }
+  }
 }
 
 async function get_messages_since() {
@@ -66,28 +114,39 @@ async function get_messages_since() {
     return
   }
 
-  const username_from = username.value
-  const username_to = chat_name.value
+  const username_from = username.value.trim()
+  const username_to = chat_name.value.trim()
   const last_msg_datetime = data.value[data.value.length - 1]['datetime']
 
-  // if (username_from == username_to) return
-  data.value.push(
-    ...(
-      await axios.get(
-        `http://127.0.0.1:8000/api/all/?since=${last_msg_datetime}&p1=${username_from}&p2=${username_to}`,
-      )
-    ).data,
-  )
+  axios
+    .get(
+      `http://127.0.0.1:8000/api/all/?since=${last_msg_datetime}&p1=${username_from}&p2=${username_to}`,
+    )
+    .then((response) => {
+      const messages = response.data
+      data.value.push(...messages)
+
+      const openRequest = indexedDB.open('messages', DB_VERSION)
+      openRequest.onsuccess = function () {
+        const db = openRequest.result
+        const msgs_trans = db.transaction('msgs', 'readwrite').objectStore('msgs')
+        for (const item of messages) {
+          msgs_trans.add(item)
+        }
+      }
+    })
+    .catch(function (error) {
+      // console.log(error)
+    })
 }
 
 async function sock_conn() {
-  const username_from = username.value
-  const username_to = chat_name.value
+  const username_from = username.value.trim()
+  const username_to = chat_name.value.trim()
 
-  if (!username_from.trim() || !username_to.trim()) return
+  if (!username_from || !username_to) return
 
-  const chat_name_string =
-    username_from > username_to ? username_from + username_to : username_to + username_from
+  const chat_name_string = get_chat_name_string(username_from, username_to)
 
   if (web_sock) {
     web_sock.close()
@@ -101,36 +160,49 @@ async function sock_conn() {
   }
 
   web_sock.onopen = () => {
-    console.log('connection opend')
+    console.log('connection opened')
   }
 }
 
 async function send_message() {
-  const username_from = un_span.value.textContent
-  const username_to = fr_span.value.textContent
+  const username_from = un_span.value.textContent.trim()
+  const username_to = fr_span.value.textContent.trim()
   const text = msg_inp.value?.value
   if (!text) return
-  data.value.push(
-    (
-      await axios.post('http://127.0.0.1:8000/api/create/', {
-        msg_from: username_from,
-        msg_to: username_to,
-        text: text,
-      })
-    ).data,
-  )
 
-  if (web_sock) {
-    web_sock.send('sent message')
-  }
+  axios
+    .post('http://127.0.0.1:8000/api/create/', {
+      msg_from: username_from,
+      msg_to: username_to,
+      text: text,
+    })
+    .then((response) => {
+      const message = response.data
+      data.value.push(message)
 
-  msg_inp.value.value = ''
-  msg_inp.value.focus()
+      const openRequest = indexedDB.open('messages', DB_VERSION)
+      openRequest.onsuccess = function () {
+        const db = openRequest.result
+        console.log()
+        const msgs_trans = db.transaction('msgs', 'readwrite').objectStore('msgs')
+        msgs_trans.add(message)
+
+        if (web_sock) {
+          web_sock.send('sent message')
+        }
+
+        msg_inp.value.value = ''
+        msg_inp.value.focus()
+      }
+    })
+    .catch(function (error) {
+      // console.log(error)
+    })
 }
 
 function set_username() {
   if (un_inp.value?.value.trim()) {
-    username.value = un_inp.value?.value
+    username.value = un_inp.value?.value.trim()
     get_messages()
     sock_conn()
   }
@@ -138,10 +210,14 @@ function set_username() {
 
 function set_friend() {
   if (fr_inp.value?.value.trim()) {
-    chat_name.value = fr_inp.value?.value
+    chat_name.value = fr_inp.value?.value.trim()
     get_messages()
     sock_conn()
   }
+}
+
+function get_chat_name_string(p1, p2) {
+  return (p1 > p2 ? p1 + p2 : p2 + p1).toString()
 }
 
 document.addEventListener('keydown', function (event) {
